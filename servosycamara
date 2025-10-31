@@ -1,0 +1,152 @@
+import cv2
+import numpy as np
+import time
+
+# -------------------------------
+# CONFIGURACIÓN SERVO MOTOR
+# -------------------------------
+SERVO_PIN = 17  # GPIO para el servo (ejemplo)
+
+def set_servo_angle(angle):
+    print(f"Servo → {angle}°")
+    # Aquí puedes poner el control real con pigpio o gpiozero
+    # from gpiozero import Servo
+    # servo = Servo(SERVO_PIN)
+    # servo.value = (angle - 90) / 90
+
+# -------------------------------
+# DETECCIÓN DE LÍNEAS AMARILLAS + MODO CURVA
+# -------------------------------
+def detectar_lineas_amarillas(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+    # Leer parámetros desde los trackbars
+    h_min = cv2.getTrackbarPos("H Min", "Control HSV")
+    h_max = cv2.getTrackbarPos("H Max", "Control HSV")
+    s_min = cv2.getTrackbarPos("S Min", "Control HSV")
+    s_max = cv2.getTrackbarPos("S Max", "Control HSV")
+    v_min = cv2.getTrackbarPos("V Min", "Control HSV")
+    v_max = cv2.getTrackbarPos("V Max", "Control HSV")
+
+    lower_yellow = np.array([h_min, s_min, v_min])
+    upper_yellow = np.array([h_max, s_max, v_max])
+
+    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+
+    # Filtros morfológicos
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.GaussianBlur(mask, (5,5), 0)
+
+    # Contornos detectados
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_selected = [c for c in contours if cv2.contourArea(c) > 700]
+    contours_selected = sorted(contours_selected, key=cv2.contourArea, reverse=True)[:2]
+
+    centers = []
+    for cnt in contours_selected:
+        M = cv2.moments(cnt)
+        if M["m00"] > 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            centers.append((cx, cy))
+            cv2.drawContours(frame, [cnt], -1, (0,255,0), 2)
+            cv2.circle(frame, (cx, cy), 5, (0,0,255), -1)
+
+    # Referencia del centro
+    height, width, _ = frame.shape
+    mid_x_line = width // 2
+    margen = 30
+    cv2.line(frame, (mid_x_line, 0), (mid_x_line, height), (0,255,0), 2)
+    cv2.line(frame, (mid_x_line - margen, 0), (mid_x_line - margen, height), (0,0,255), 1)
+    cv2.line(frame, (mid_x_line + margen, 0), (mid_x_line + margen, height), (0,0,255), 1)
+
+    # -------------------------------
+    # LÓGICA PRINCIPAL
+    # -------------------------------
+    if len(centers) == 2:
+        # 🟢 Modo normal: dos líneas detectadas
+        (x1, y1), (x2, y2) = centers
+        mid_x = (x1 + x2) // 2
+        mid_y = (y1 + y2) // 2
+
+        cv2.circle(frame, (mid_x, mid_y), 6, (0,255,255), -1)
+        cv2.line(frame, (x1,y1), (x2,y2), (255,0,0), 2)
+
+        error = mid_x - mid_x_line
+        if abs(error) < margen:
+            print("🟢 Centrado - Servo 90°")
+            set_servo_angle(90)
+        elif error < 0:
+            print("⬅ Giro izquierda")
+            set_servo_angle(65)
+        else:
+            print("➡ Giro derecha")
+            set_servo_angle(115)
+
+    elif len(centers) == 1:
+        # 🟠 MODO CURVA: solo una línea detectada
+        (x, y) = centers[0]
+        cv2.putText(frame, "Modo Curva", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,255), 2)
+
+        error = x - mid_x_line
+
+        # Si la línea está a la izquierda → curva izquierda
+        if error < -margen:
+            print("↩ Curva izquierda (solo una línea visible)")
+            set_servo_angle(65)
+        elif error > margen:
+            print("↪ Curva derecha (solo una línea visible)")
+            set_servo_angle(115)
+        else:
+            print("➡ Manteniendo rumbo (modo curva suave)")
+            set_servo_angle(90)
+
+    else:
+        # 🔴 No se detecta nada
+        cv2.putText(frame, "Líneas no detectadas", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+        print("⚠ Sin detección - Manteniendo servo neutro")
+        set_servo_angle(90)
+
+    return frame
+
+
+# -------------------------------
+# TRACKBARS DE CONTROL HSV
+# -------------------------------
+def nothing(x): pass
+
+PRESET = {
+    "H Min": 18,
+    "H Max": 35,
+    "S Min": 80,
+    "S Max": 255,
+    "V Min": 50,
+    "V Max": 255
+}
+
+cv2.namedWindow("Control HSV")
+for key, value in PRESET.items():
+    max_val = 179 if "H" in key else 255
+    cv2.createTrackbar(key, "Control HSV", value, max_val, nothing)
+
+# -------------------------------
+# CAPTURA DE VIDEO
+# -------------------------------
+cap = cv2.VideoCapture(0)
+cv2.namedWindow("Carro autonomo - detección de carril")
+
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        resultado = detectar_lineas_amarillas(frame)
+        cv2.imshow("Carro autonomo - detección de carril", resultado)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
